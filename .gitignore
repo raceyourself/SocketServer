@@ -1,0 +1,24 @@
+# android project properties that varies phone to phone. Probably bad..
+project.properties
+
+# built application files
+*.apk
+*.ap_
+
+# files for the dex VM
+*.dex
+
+# Java class files
+*.class
+
+# generated files
+gen/
+doc/
+bin/
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Eclipse project files
+.classpath
+.project
