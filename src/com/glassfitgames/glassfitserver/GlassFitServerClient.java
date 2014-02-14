@@ -72,7 +72,7 @@ public class GlassFitServerClient {
     private void handle(byte[] data) {
         System.out.println("** Received " + data.length);
         if (data.length == 0) {
-            // PING
+            onPing();
             return;
         }                
         ByteBuffer packet = ByteBuffer.wrap(data);                
@@ -82,22 +82,20 @@ public class GlassFitServerClient {
         case 0x01: {
             // User->user message
             int fromUid = packet.getInt();
-            String message = new String(packet.array(), packet.position(), packet.remaining());
-            System.out.println("<" + fromUid + ">: " + message);
+            onUserMessage(fromUid, packet);
             break;
         }
         case 0x02: {
             // User->group message
             int fromUid = packet.getInt();
             int fromGid = packet.getInt();
-            String message = new String(packet.array(), packet.position(), packet.remaining());
-            System.out.println("#" + fromGid + " <" + fromUid + ">: " + message);
+            onGroupMessage(fromUid, fromGid, packet);
             break;
         }
         case 0x10: {
             // Created a group
             int groupId = packet.getInt();
-            System.out.println("* Created group " + groupId);
+            onGroupCreated(groupId);
             break;
         }
         default: {
@@ -107,6 +105,23 @@ public class GlassFitServerClient {
             return;
         }
         }
+    }
+    
+    protected void onUserMessage(int fromUid, ByteBuffer data) {
+        String message = new String(data.array(), data.position(), data.remaining());
+        System.out.println("<" + fromUid + ">: " + message);        
+    }
+    
+    protected void onGroupMessage(int fromUid, int fromGid, ByteBuffer data) {
+        String message = new String(data.array(), data.position(), data.remaining());
+        System.out.println("#" + fromGid + " <" + fromUid + ">: " + message);        
+    }
+    
+    protected void onGroupCreated(int groupId) {
+        System.out.println("* Created group " + groupId);        
+    }
+    
+    protected void onPing() {        
     }
     
     protected void send(byte[] data) {
@@ -159,6 +174,10 @@ public class GlassFitServerClient {
     
     public void shutdown() {
         running = false;
+    }
+    
+    public boolean isRunning() {
+        return running;
     }
     
     public void disconnect() {

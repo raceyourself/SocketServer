@@ -6,12 +6,15 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.concurrent.ConcurrentHashMap;
 
+import javax.sql.DataSource;
+
 public class Users {
-    private final PreparedStatement userIdFromToken;
+    private final DataSource database;
+    private final String USER_ID_FROM_TOKEN = "SELECT resource_owner_id FROM oauth_access_tokens WHERE expires_in < NOW() AND revoked_at IS NULL AND token = ?";
     private final ConcurrentHashMap<Integer, User> users = new ConcurrentHashMap<Integer, User>();
     
-    public Users(Connection database) throws SQLException {
-        userIdFromToken = database.prepareStatement("SELECT resource_owner_id FROM oauth_access_tokens WHERE expires_in < NOW() AND revoked_at IS NULL AND token = ?");
+    public Users(DataSource database) throws SQLException {
+        this.database = database;
     }
     
     public User fromToken(String token) {
@@ -25,10 +28,14 @@ public class Users {
     }
     
     private User fromTokenImpl(String token) throws SQLException {
+        Connection c = database.getConnection();
+        PreparedStatement userIdFromToken = c.prepareStatement(USER_ID_FROM_TOKEN);
         userIdFromToken.setString(1, token);
         ResultSet result = userIdFromToken.executeQuery();
         if (!result.next()) return null;
         int userId = result.getInt(1);
+        result.close();
+        c.close();
         User user = get(userId);
         if (user == null) user = createUser(userId);
         return user;

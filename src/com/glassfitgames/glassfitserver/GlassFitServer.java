@@ -1,5 +1,6 @@
 package com.glassfitgames.glassfitserver;
 
+import java.beans.PropertyVetoException;
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -10,8 +11,6 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.SelectorProvider;
-import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -20,6 +19,10 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
+
+import javax.sql.DataSource;
+
+import com.mchange.v2.c3p0.ComboPooledDataSource;
 
 public class GlassFitServer {
     private final ConcurrentHashMap<SocketChannel, Queue<byte[]>> messageQueues = new ConcurrentHashMap<SocketChannel, Queue<byte[]>>();
@@ -40,23 +43,40 @@ public class GlassFitServer {
     private InetAddress hostAddress = null;
     private int port;
     private final String databaseDriver = "com.mysql.jdbc.Driver";
-//    private final String databaseUrl = "jdbc:mysql://localhost/gf_core_development?autoreconnect=true&user=gf-server&password=securemewithclientcerts";
-    private final String databaseUrl = "jdbc:mysql://localhost/gf_core?autoreconnect=true&user=gf-server&password=securemewithclientcerts";
+//    private final String databaseUrl = "jdbc:mysql://localhost/gf_core_development";
+    private final String databaseUrl = "jdbc:mysql://localhost/gf_core";
+    private final String databaseUser = "gf-server";
+    private final String databasePassword = "securemewithclientcerts";
     
     private final Selector selector;    
-    private final Connection database;
+    private final DataSource database;
     
-    public GlassFitServer() throws IOException, ClassNotFoundException, SQLException {
+    public GlassFitServer() throws IOException, SQLException, PropertyVetoException {
         this(DEFAULT_PORT);
     }
 
-    public GlassFitServer(int port) throws IOException, ClassNotFoundException, SQLException {
+    public GlassFitServer(int port) throws IOException, SQLException, PropertyVetoException {
         this.port = port;
         selector = initSelector();
         
-        Class.forName(databaseDriver); // Load driver class
-        database = DriverManager.getConnection(databaseUrl);
-        users = new Users(database);
+        ComboPooledDataSource database = new ComboPooledDataSource();
+        database.setDriverClass(databaseDriver); // loads the jdbc driver
+        database.setJdbcUrl(databaseUrl);
+        database.setUser(databaseUser);
+        database.setPassword(databasePassword);
+
+        // pooling configuration
+        database.setMinPoolSize(1);
+        database.setAcquireIncrement(3);
+        database.setMaxPoolSize(25);
+        database.setMaxStatements(50);
+        database.setMaxIdleTime(60);
+        database.setTestConnectionOnCheckout(true);
+        database.setPreferredTestQuery("SELECT 1");
+        
+        this.database = database;
+        
+        users = new Users(this.database);
     }
     
     public void messageUser(User user, byte[] data) throws IOException {
