@@ -168,8 +168,12 @@ public class GlassFitServerClient {
     }
 
     public static void main(String[] args) throws IOException {
+        if (args.length != 1) {
+            System.err.println("USAGE: client <access token>");
+            System.exit(1);
+        }
         System.out.println("Starting client");
-        final GlassFitServerClient client = new GlassFitServerClient("bob".getBytes(), "socket.raceyourself.com");
+        final GlassFitServerClient client = new GlassFitServerClient(args[0].getBytes(), "socket.raceyourself.com");
         System.out.println("Started client");
         Thread looper = new Thread(new Runnable() {
 
@@ -210,5 +214,6 @@ public class GlassFitServerClient {
         } catch (Exception e) {
             e.printStackTrace();
         }
+        System.exit(0);
     }    
 }

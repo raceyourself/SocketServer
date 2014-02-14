@@ -10,6 +10,9 @@ import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.SelectorProvider;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.SQLException;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Queue;
@@ -23,27 +26,37 @@ public class GlassFitServer {
     private final ConcurrentHashMap<SocketChannel, PacketBuffer> readBuffers = new ConcurrentHashMap<SocketChannel, PacketBuffer>();
     private final ConcurrentHashMap<SocketChannel, ByteBuffer> writeBuffers = new ConcurrentHashMap<SocketChannel, ByteBuffer>();
     
-    private final ConcurrentHashMap<Integer, User> users = new ConcurrentHashMap<Integer, User>();
+    private final Users users;
     private final ConcurrentHashMap<SocketChannel, Integer> connectedUsers = new ConcurrentHashMap<SocketChannel, Integer>();
     private final ConcurrentHashMap<Integer, Set<Integer>> usergroups = new ConcurrentHashMap<Integer, Set<Integer>>();
     
-    private Random random = new Random();
+    private final Random random = new Random();
     
     public final static int DEFAULT_PORT = 9090;
 
     private boolean running = true;
     
+    // Config
     private InetAddress hostAddress = null;
     private int port;
-    private Selector selector;
-
-    public GlassFitServer() throws IOException {
+    private final String databaseDriver = "com.mysql.jdbc.Driver";
+//    private final String databaseUrl = "jdbc:mysql://localhost/gf_core_development?autoreconnect=true&user=gf-server&password=securemewithclientcerts";
+    private final String databaseUrl = "jdbc:mysql://localhost/gf_core?autoreconnect=true&user=gf-server&password=securemewithclientcerts";
+    
+    private final Selector selector;    
+    private final Connection database;
+    
+    public GlassFitServer() throws IOException, ClassNotFoundException, SQLException {
         this(DEFAULT_PORT);
     }
 
-    public GlassFitServer(int port) throws IOException {
+    public GlassFitServer(int port) throws IOException, ClassNotFoundException, SQLException {
         this.port = port;
         selector = initSelector();
+        
+        Class.forName(databaseDriver); // Load driver class
+        database = DriverManager.getConnection(databaseUrl);
+        users = new Users(database);
     }
     
     public void messageUser(User user, byte[] data) throws IOException {
@@ -178,7 +191,6 @@ public class GlassFitServer {
                     if (user != null) {
                         if (connectedUsers.putIfAbsent(socketChannel, user.getId()) != null) throw new RuntimeException("Concurrency error");
                         user.connected(socketChannel);
-                        users.put(user.getId(), user);
                         userId = user.getId();
                         System.out.println("Client " + socketChannel.getRemoteAddress().toString() + " authenticated as " + user.getId());
                         
@@ -292,10 +304,8 @@ public class GlassFitServer {
     private User authenticate(SelectionKey key, byte[] packet) throws IOException {
         if (packet == null) return null;
 
-        User user;
-        String token = new String(packet, "UTF-8");
-        if (token != null) user = new User(1+random.nextInt(2)); // TODO
-        else return null;
+        String token = new String(packet, "UTF-8");        
+        User user = users.fromToken(token);
         
         // Enable read/write once something is read
         key.channel().register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
@@ -377,7 +387,7 @@ public class GlassFitServer {
         running = false;
     }
     
-    public static void main(String[] args) throws IOException {
+    public static void main(String[] args) throws Throwable {
         System.out.println("Starting server..");
         final GlassFitServer server = new GlassFitServer();
         Runtime.getRuntime().addShutdownHook(new Thread()

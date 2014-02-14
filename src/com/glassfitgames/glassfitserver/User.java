@@ -1,7 +1,6 @@
 package com.glassfitgames.glassfitserver;
 
 import java.io.IOException;
-import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.util.Collections;
 import java.util.HashSet;
