@@ -103,12 +103,15 @@ public class GlassFitServer {
         return groupId;
     }
     
-    public boolean messageGroup(int groupId, byte[] data) {
-        Set<Integer> users = usergroups.get(groupId);
-        if (users == null) return false;
+    public boolean messageGroup(int fromId, int groupId, byte[] data) throws IOException {
+        Set<Integer> userIds = usergroups.get(groupId);
+        if (userIds == null) return false;
         
-        for(Integer user : users) {
-            
+        for(Integer userId : userIds) {
+            if (userId == fromId) continue; // Don't echo back
+            User user = users.get(userId);
+            if (user != null) messageUser(user, data);
+            else System.err.println("Unknown user " + userId + " in group " + groupId);
         }
         
         return true;
@@ -267,7 +270,7 @@ public class GlassFitServer {
             message.putInt(user.getId());
             message.putInt(groupId);
             message.put(packet);
-            if (!messageGroup(groupId, message.array())) {
+            if (!messageGroup(user.getId(), groupId, message.array())) {
                 System.err.println("Could not send message to group " + groupId + " from " + user.getId() + "/" + ((SocketChannel)key.channel()).getRemoteAddress().toString());
             }
             break;
