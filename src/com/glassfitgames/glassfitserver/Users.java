@@ -4,13 +4,15 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.SQLWarning;
 import java.util.concurrent.ConcurrentHashMap;
 
 import javax.sql.DataSource;
 
 public class Users {
     private final DataSource database;
-    private final String USER_ID_FROM_TOKEN = "SELECT resource_owner_id FROM oauth_access_tokens WHERE expires_in < NOW() AND revoked_at IS NULL AND token = ?";
+    // NOTE: MySQL specific time handling
+    private final String USER_ID_FROM_TOKEN = "SELECT resource_owner_id FROM oauth_access_tokens WHERE TIME_TO_SEC(TIMEDIFF(now(), created_at)) < expires_in AND revoked_at IS NULL AND token = ?";
     private final ConcurrentHashMap<Integer, User> users = new ConcurrentHashMap<Integer, User>();
     
     public Users(DataSource database) throws SQLException {
@@ -32,8 +34,10 @@ public class Users {
         PreparedStatement userIdFromToken = c.prepareStatement(USER_ID_FROM_TOKEN);
         userIdFromToken.setString(1, token);
         ResultSet result = userIdFromToken.executeQuery();
+        printWarnings(userIdFromToken.getWarnings());
         if (!result.next()) return null;
         int userId = result.getInt(1);
+        printWarnings(result.getWarnings());
         result.close();
         c.close();
         User user = get(userId);
@@ -50,5 +54,15 @@ public class Users {
     
     public User get(int id) {
         return users.get(id);
+    }
+    
+    private void printWarnings(SQLWarning warning) {
+        while(warning != null) {
+            System.err.println("\nSQL Warning:");
+            System.err.println(warning.getMessage());
+            System.err.println("ANSI-92 SQL State: " + warning.getSQLState());
+            System.err.println("Vendor Error Code: " + warning.getErrorCode());
+            warning = warning.getNextWarning();
+        }
     }
 }
