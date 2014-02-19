@@ -1,27 +1,33 @@
 package com.glassfitgames.glassfitserver;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.util.Random;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class GlassFitServerClient {
+    public final static long KEEPALIVE_INTERVAL = 15000;
+    private Ping ping = null;
+    private final Random random = new Random();
+    
     private final Socket socket;
-    private ConcurrentLinkedQueue<byte[]> msgQueue = new ConcurrentLinkedQueue<byte[]>();
+    private ConcurrentLinkedQueue<Timestamped<byte[]>> msgQueue = new ConcurrentLinkedQueue<Timestamped<byte[]>>();
     
     private boolean running = true;
     
     public GlassFitServerClient(byte[] token, String host) throws UnknownHostException, IOException {
-        this(token, host, GlassFitServer.DEFAULT_PORT);
+        this(token, host, 9090);
     }
     public GlassFitServerClient(byte[] token, String host, int port) throws UnknownHostException, IOException {
         System.out.println("** Connecting");
         socket = new Socket(host, port);
         socket.setTcpNoDelay(true);
+        socket.setKeepAlive(true);
+        socket.setPerformancePreferences(1, 2, 0);
 
         System.out.println("** Authenticating");
         PacketBuffer.write(socket.getOutputStream(), token);
@@ -36,35 +42,56 @@ public class GlassFitServerClient {
     }
     
     public void loop() throws IOException {
-        InputStream is = socket.getInputStream();
-        OutputStream os = socket.getOutputStream();
-        while (running) {
-            boolean busy = false;
-            byte[] data = msgQueue.poll();
-            if (data != null) {
-                PacketBuffer.write(os, data);
-                System.out.println("** Sent " + data.length);
-                busy = true;
-            }
-            if (is.available() > 0) {
-                byte[] packet = PacketBuffer.read(is);
-                if (packet == null) {
-                    disconnect();
-                    shutdown();
-                    throw new IOException("Server did not respond with a valid packet");
+        try {
+            OutputStream os = socket.getOutputStream();
+            long alive = System.currentTimeMillis();
+            while (running) {
+                long cycle = System.currentTimeMillis();
+                boolean busy = false;
+                Timestamped<byte[]> data = msgQueue.peek();
+                if (data == null && ping == null && System.currentTimeMillis() - alive > KEEPALIVE_INTERVAL) {
+                    ping();
                 }
-                handle(packet);            
-                busy = true;
-            }
-            if (!busy) {
+                while ((data = msgQueue.poll()) != null) {
+                    long start = System.currentTimeMillis();
+                    PacketBuffer.write(os, data.getValue());
+                    System.out.println("** Sent " + data.getValue().length + " q-delay: " + (System.currentTimeMillis() - data.getTimestamp()) + "ms" + ", w-delay: " + (System.currentTimeMillis() - start) + "ms");
+                    busy = true;
+                }
+                if (busy) os.flush();
                 try {
-                    synchronized(this) {
-                        this.wait(100);
+                    long start = System.currentTimeMillis();
+                    byte[] packet = PacketBuffer.read(socket);
+                    if (packet == null) {
+                        disconnect();
+                        shutdown();
+                        throw new IOException("Server did not respond with a valid packet");
                     }
-                } catch (InterruptedException e) {
-                    e.printStackTrace();
+                    System.out.println("** Read " + packet.length + " r-delay: " + (System.currentTimeMillis() - start) + "ms");
+                    handle(packet);            
+                    busy = true;
+                } catch (SocketTimeoutException e) {
+                    // Nothing to read
                 }
+                if (!busy) {
+                    try {
+                        long start = System.currentTimeMillis();
+                        synchronized(this) {
+                            this.wait(100);
+                        }
+                        if (System.currentTimeMillis() - start > 250) System.err.println("*** Overslept " + (System.currentTimeMillis() - start - 100) + "ms, possible thread contention");
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                } else {
+                    alive = System.currentTimeMillis();
+                }
+                cycle = System.currentTimeMillis() - cycle;
+                if (cycle > 500) System.err.println("Cycle took " + cycle + "ms");
             }
+        } catch (Throwable t) {
+            t.printStackTrace();
+            running = false;
         }
         if (!socket.isClosed()) disconnect();
     }
@@ -79,20 +106,40 @@ public class GlassFitServerClient {
         byte command = packet.get();
         
         switch (command) {
-        case 0x01: {
+        case (byte)0x00: {
+            // PING->PONG
+            int pingId = packet.getInt();
+            ByteBuffer message = ByteBuffer.allocate(1 + 4);
+            message.put((byte)0xff);
+            message.putInt(pingId);
+            send(message.array());
+            break;
+        }
+        case (byte)0xff: {
+            // PONG
+            int pingId = packet.getInt();
+            if (ping == null || ping.getId() != pingId) {
+                System.err.println("Invalid pong from server");
+                break;
+            }
+            System.out.println(ping.Rtt() + "ms round-trip time to server");
+            ping = null;
+            break;
+        }
+        case (byte)0x01: {
             // User->user message
             int fromUid = packet.getInt();
             onUserMessage(fromUid, packet);
             break;
         }
-        case 0x02: {
+        case (byte)0x02: {
             // User->group message
             int fromUid = packet.getInt();
             int fromGid = packet.getInt();
             onGroupMessage(fromUid, fromGid, packet);
             break;
         }
-        case 0x10: {
+        case (byte)0x10: {
             // Created a group
             int groupId = packet.getInt();
             onGroupCreated(groupId);
@@ -125,7 +172,7 @@ public class GlassFitServerClient {
     }
     
     protected void send(byte[] data) {
-        msgQueue.add(data);
+        msgQueue.add(new Timestamped<byte[]>(data));
         synchronized(this) {
             this.notify();
         }
@@ -172,6 +219,14 @@ public class GlassFitServerClient {
         System.out.println("#" + groupId + ", " + new String(data));
     }
     
+    public void ping() {
+        ping = new Ping(random.nextInt());
+        ByteBuffer message = ByteBuffer.allocate(1 + 4);
+        message.put((byte)0x00);
+        message.putInt(ping.getId());
+        send(message.array());        
+    }
+    
     public void shutdown() {
         running = false;
     }
@@ -210,17 +265,7 @@ public class GlassFitServerClient {
         System.out.println("Started looper");
         
         try {
-            Random random = new Random();
-            int me = 1 + random.nextInt() % 2;
             System.out.println("Sleeping");
-            Thread.sleep(random.nextInt(5000));
-            System.out.println("Slept");
-            int you = 1 + random.nextInt() % 2;
-            client.messageUser(you, "Hello, bub".getBytes());
-            System.out.println("Messaged " + you);
-            System.out.println("Sleeping");
-            Thread.sleep(5000);
-            System.out.println("Slept");
 //            client.createGroup();
 //            System.out.println("Created group");
 //            client.joinGroup(1);
@@ -229,10 +274,27 @@ public class GlassFitServerClient {
 //            System.out.println("Messaged group");
 //            client.leaveGroup(1);
 //            System.out.println("left group");
-            client.shutdown();
+            Thread.sleep(90000);
         } catch (Exception e) {
             e.printStackTrace();
         }
         System.exit(0);
     }    
+    
+    private static class Timestamped<T> {
+        private final long timestamp;
+        private final T value;
+        
+        public Timestamped(T value) {
+            timestamp = System.currentTimeMillis();
+            this.value = value;
+        }
+        
+        public long getTimestamp() {
+            return timestamp;
+        }
+        public T getValue() {
+            return value;
+        }
+    }
 }

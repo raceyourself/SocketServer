@@ -3,6 +3,7 @@ package com.glassfitgames.glassfitserver;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.Socket;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 
@@ -110,9 +111,22 @@ public class PacketBuffer  {
         os.write(data);
     }
     
-    private static ByteBuffer headerlength = ByteBuffer.allocate(4);
+    public static synchronized byte[] read(Socket socket) throws IOException {
+        InputStream is = socket.getInputStream();
+        // 250ms timeout for first byte so we don't block indefinitely
+        socket.setSoTimeout(250);
+        int b = is.read();
+        socket.setSoTimeout(0);
+        if (b != 0xd3 || is.read() != 0x4d || is.read() != 0xb3 || is.read() != 0x3f) return null; // Invalid header marker
+        return readRest(is);
+    }
     public static synchronized byte[] read(InputStream is) throws IOException {
         if (is.read() != 0xd3 || is.read() != 0x4d || is.read() != 0xb3 || is.read() != 0x3f) return null; // Invalid header marker
+        return readRest(is);
+    }
+    
+    private static ByteBuffer headerlength = ByteBuffer.allocate(4);
+    private static synchronized byte[] readRest(InputStream is) throws IOException {
         headerlength.clear();
         headerlength.order(ByteOrder.BIG_ENDIAN); // Network byte order
         headerlength.put((byte)is.read());

@@ -25,9 +25,11 @@ import javax.sql.DataSource;
 import com.mchange.v2.c3p0.ComboPooledDataSource;
 
 public class GlassFitServer {
-    private final ConcurrentHashMap<SocketChannel, Queue<byte[]>> messageQueues = new ConcurrentHashMap<SocketChannel, Queue<byte[]>>();
+    private final ConcurrentHashMap<SocketChannel, Queue<Timestamped<byte[]>>> messageQueues = new ConcurrentHashMap<SocketChannel, Queue<Timestamped<byte[]>>>();
     private final ConcurrentHashMap<SocketChannel, PacketBuffer> readBuffers = new ConcurrentHashMap<SocketChannel, PacketBuffer>();
     private final ConcurrentHashMap<SocketChannel, ByteBuffer> writeBuffers = new ConcurrentHashMap<SocketChannel, ByteBuffer>();
+    private final ConcurrentHashMap<SocketChannel, Long> connections = new ConcurrentHashMap<SocketChannel, Long>();
+    private final ConcurrentHashMap<SocketChannel, Ping> pings = new ConcurrentHashMap<SocketChannel, Ping>();
     
     private final Users users;
     private final ConcurrentHashMap<SocketChannel, Integer> connectedUsers = new ConcurrentHashMap<SocketChannel, Integer>();
@@ -36,6 +38,7 @@ public class GlassFitServer {
     private final Random random = new Random();
     
     public final static int DEFAULT_PORT = 9090;
+    public final static long KEEPALIVE_INTERVAL = 30000;
 
     private boolean running = true;
     
@@ -83,11 +86,35 @@ public class GlassFitServer {
         Set<SocketChannel> connections = user.getConnections();
         if (connections.isEmpty()) System.out.println("No connections for user " + user.getId());
         for (SocketChannel socketChannel : connections) {
-            Queue<byte[]> deque = messageQueues.get(socketChannel);
-            if (deque != null) {
-                deque.add(data);
-            } else System.err.println("No queue for " + socketChannel.getRemoteAddress().toString());
+            messageSocket(socketChannel, data);
         }
+    }
+    
+    private void messageSocket(SocketChannel socketChannel, byte[] data) throws IOException {
+        Queue<Timestamped<byte[]>> deque = messageQueues.get(socketChannel);
+        if (deque != null) {
+            if (deque.isEmpty() && writeBuffers.get(socketChannel) == null) {
+                // Attempt to write straight away if nothing queued
+                if (writeBuffers.putIfAbsent(socketChannel, ByteBuffer.wrap(data)) == null) {
+                    write(socketChannel);
+                } else {
+                    // Fall back to queue
+                    deque.add(new Timestamped<byte[]>(data));                    
+                }
+            } else {
+                // Add to queue
+                deque.add(new Timestamped<byte[]>(data));
+            }
+        } else System.err.println("No queue for " + socketChannel.getRemoteAddress().toString());    
+    }
+    
+    public void ping(SocketChannel socketChannel) throws IOException {
+        Ping ping = new Ping(random.nextInt());
+        pings.put(socketChannel, ping);
+        ByteBuffer message = PacketBuffer.allocateMessageBuffer(1 + 4);
+        message.put((byte)0x00);
+        message.putInt(ping.getId());
+        messageSocket(socketChannel, message.array());
     }
 
     public int createGroup() {
@@ -118,10 +145,11 @@ public class GlassFitServer {
     }
 
     public void loop() {
-        while (running) {
-            try {
+        try {
+            while (running) {
                 
                 selector.select();
+                long loop = System.currentTimeMillis();
                 Iterator<SelectionKey> selectedKeys = selector.selectedKeys().iterator();
                 while (selectedKeys.hasNext()) {
                     SelectionKey key = selectedKeys.next();
@@ -147,11 +175,13 @@ public class GlassFitServer {
                         cancel(key);
                     }
                 }
+                loop = System.currentTimeMillis() - loop;
+                if (loop > 100) System.err.println("Cycle took " + loop + "ms");
 
-            } catch (Exception e) {
-                e.printStackTrace();
-                System.exit(1);
             }
+        } catch (Exception e) {
+            e.printStackTrace();
+            System.exit(1);
         }
     }
 
@@ -165,7 +195,7 @@ public class GlassFitServer {
         socketChannel.register(selector, SelectionKey.OP_READ);
 
         readBuffers.putIfAbsent(socketChannel, new PacketBuffer());
-        messageQueues.putIfAbsent(socketChannel, new LinkedBlockingQueue<byte[]>());
+        messageQueues.putIfAbsent(socketChannel, new LinkedBlockingQueue<Timestamped<byte[]>>());
         
         System.out.println("Client " + socketChannel.getRemoteAddress().toString() + " connected");
     }
@@ -218,7 +248,7 @@ public class GlassFitServer {
                         System.out.println("Client " + socketChannel.getRemoteAddress().toString() + " authenticated as " + user.getId());
                         
                         // Acknowledge auth by pinging client
-                        messageUser(user, PacketBuffer.PING);
+                        ping(socketChannel);
                         
                         packet = buffer.getPacket(); // Check for next packet
                     } else {
@@ -243,11 +273,33 @@ public class GlassFitServer {
             // PING
             return;
         }        
-        ByteBuffer packet = ByteBuffer.wrap(data);                
-        byte command = packet.get();
+        final SocketChannel socketChannel = (SocketChannel)key.channel();
+        final ByteBuffer packet = ByteBuffer.wrap(data);                
+        final byte command = packet.get();
         
         switch (command) {
-        case 0x01: {
+        case (byte)0x00: {
+            // PING->PONG
+            int pingId = packet.getInt();
+            ByteBuffer message = PacketBuffer.allocateMessageBuffer(1 + 4);
+            message.put((byte)0xff);
+            message.putInt(pingId);
+            message.put(packet);
+            messageSocket(socketChannel, message.array());
+            break;
+        }
+        case (byte)0xff: {
+            // PONG
+            int pingId = packet.getInt();
+            Ping ping = pings.get(socketChannel);
+            if (ping == null || ping.getId() != pingId) {
+                System.err.println("Invalid pong from " + user.getId() + "/" + ((SocketChannel)key.channel()).getRemoteAddress().toString());
+                break;
+            }
+            System.out.println(ping.Rtt() + "ms round-trip time to " + user.getId() + "/" + ((SocketChannel)key.channel()).getRemoteAddress().toString());
+            break;
+        }
+        case (byte)0x01: {
             // User->user message
             int userId = packet.getInt();
             User recipient = users.get(userId);
@@ -262,7 +314,7 @@ public class GlassFitServer {
             messageUser(recipient, message.array());
             break;
         }
-        case 0x02: {
+        case (byte)0x02: {
             // User->group message
             int groupId = packet.getInt();
             ByteBuffer message = PacketBuffer.allocateMessageBuffer(1 + 4 + 4 + packet.remaining());
@@ -275,7 +327,7 @@ public class GlassFitServer {
             }
             break;
         }
-        case 0x10: {
+        case (byte)0x10: {
             // Create a messaging group
             int groupId = createGroup();
             if (groupId < 0) {
@@ -292,7 +344,7 @@ public class GlassFitServer {
             messageUser(user, response.array());
             break;
         }
-        case 0x11: {
+        case (byte)0x11: {
             // Join a messaging group
             int groupId = packet.getInt();            
             Set<Integer> userset = usergroups.get(groupId);
@@ -303,7 +355,7 @@ public class GlassFitServer {
             }
             break;
         }
-        case 0x12: {
+        case (byte)0x12: {
             // Leave a messaging group
             int groupId = packet.getInt();            
             Set<Integer> userset = usergroups.get(groupId);
@@ -330,45 +382,51 @@ public class GlassFitServer {
         String token = new String(packet, "UTF-8");        
         User user = users.fromToken(token);
         
-        // Enable read/write once something is read
-        key.channel().register(selector, SelectionKey.OP_READ | SelectionKey.OP_WRITE);
         return user;
     }
     
     private void write(SelectionKey key) throws IOException {
+        SocketChannel socketChannel = (SocketChannel) key.channel();
+        write(socketChannel);
+    }
+    private void write(SocketChannel socketChannel) throws IOException {
         // NOTE: Not thread-safe. Only one thread may ever write to the same channel at a time!
         // TODO: Timeout idle connections?
-        
-        SocketChannel socketChannel = (SocketChannel) key.channel();
-        
+            
         // Continue partial write
         ByteBuffer packet = writeBuffers.get(socketChannel);
         if (packet != null) {
             int numWritten = socketChannel.write(packet);
+            connections.put(socketChannel, System.currentTimeMillis());
             if (numWritten > 0) System.out.println("Sent " + numWritten + "B to " + socketChannel.getRemoteAddress().toString());
-            if (packet.remaining() > 0) {
-                System.err.print("Buffer still full for " + socketChannel.getRemoteAddress().toString());
+            if (packet.remaining() > 0) {                
+                socketChannel.keyFor(selector).interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+                System.err.println("Buffer still full for " + socketChannel.getRemoteAddress().toString());
                 return;
             }
-            writeBuffers.remove(key);
+            writeBuffers.remove(socketChannel);
         }
-
+        
         // Send queued user messages
-        Queue<byte[]> queue = messageQueues.get(socketChannel);
+        Queue<Timestamped<byte[]>> queue = messageQueues.get(socketChannel);
         if (queue != null) {
-            byte[] data;
+            Timestamped<byte[]> data;
             while ( (data = queue.poll()) != null) {
-                packet = ByteBuffer.wrap(data);
+                packet = ByteBuffer.wrap(data.getValue());
                 int numWritten = socketChannel.write(packet);
-                if (numWritten > 0) System.out.println("Sent " + numWritten + "B to " + socketChannel.getRemoteAddress().toString());
+                connections.put(socketChannel, System.currentTimeMillis());
+                if (numWritten > 0) System.out.println("Sent " + numWritten + "B to " + socketChannel.getRemoteAddress().toString() + " delay: " + (System.currentTimeMillis()-data.getTimestamp()) + "ms");
                 if (packet.remaining() > 0) {
-                    System.err.print("Buffer full for " + socketChannel.getRemoteAddress().toString());
+                    socketChannel.keyFor(selector).interestOps(SelectionKey.OP_READ | SelectionKey.OP_WRITE);
+                    System.err.println("Buffer full for " + socketChannel.getRemoteAddress().toString());
                     if (writeBuffers.putIfAbsent(socketChannel, packet) != null) throw new RuntimeException("Concurrency error");
                     return;
                 }
             }
         } // else not connected
-        
+
+        // Everything queued should now be written
+        socketChannel.keyFor(selector).interestOps(SelectionKey.OP_READ);
     }
        
     private Selector initSelector() throws IOException {
@@ -396,6 +454,8 @@ public class GlassFitServer {
         readBuffers.remove(socketChannel);
         writeBuffers.remove(socketChannel);
         messageQueues.remove(socketChannel);
+        connections.remove(socketChannel);
+        pings.remove(socketChannel);
         Integer userId = connectedUsers.remove(socketChannel);
         if (userId != null) {
             User user = users.get(userId);
@@ -424,4 +484,21 @@ public class GlassFitServer {
         });
         server.loop();
     }
+    
+    private static class Timestamped<T> {
+        private final long timestamp;
+        private final T value;
+        
+        public Timestamped(T value) {
+            timestamp = System.currentTimeMillis();
+            this.value = value;
+        }
+        
+        public long getTimestamp() {
+            return timestamp;
+        }
+        public T getValue() {
+            return value;
+        }
+    }    
 }
